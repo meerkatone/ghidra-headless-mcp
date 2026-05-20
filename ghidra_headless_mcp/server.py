@@ -496,8 +496,12 @@ def _tool_property_schema(param_name: str, param: inspect.Parameter) -> dict[str
         return dict(_ADDRESS_SCHEMA)
     annotation = "" if param.annotation is inspect._empty else str(param.annotation)
     default = param.default
-    if param_name in {"args", "script_args", "values"}:
-        return {"type": "array"}
+    if param_name == "args":
+        return {"type": "array", "items": {}}
+    if param_name == "script_args":
+        return {"type": "array", "items": {"type": "string"}}
+    if param_name == "values":
+        return {"type": "array", "items": {"type": "integer"}}
     if param_name == "kwargs":
         return {"type": "object"}
     if isinstance(default, bool) or "bool" in annotation:
@@ -509,11 +513,11 @@ def _tool_property_schema(param_name: str, param: inspect.Parameter) -> dict[str
     if isinstance(default, str):
         return {"type": "string"}
     if isinstance(default, (list, tuple)):
-        return {"type": "array"}
+        return {"type": "array", "items": {}}
     if isinstance(default, dict):
         return {"type": "object"}
     if "list" in annotation or "tuple" in annotation:
-        return {"type": "array"}
+        return {"type": "array", "items": {}}
     if "dict" in annotation:
         return {"type": "object"}
     if "int" in annotation and "str" not in annotation:

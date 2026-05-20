@@ -245,3 +245,20 @@ def test_search_and_comment_tool_schemas_expose_string_queries() -> None:
     assert search_text["properties"]["encoding"]["type"] == "string"
     assert "oneOf" in search_text["properties"]["start"]
     assert "oneOf" in search_text["properties"]["end"]
+
+
+def test_array_tool_schemas_expose_item_types() -> None:
+    ghidra_call = _tool_spec("ghidra.call")
+    assert ghidra_call["properties"]["args"] == {"type": "array", "items": {}}
+
+    ghidra_script = _tool_spec("ghidra.script")
+    assert ghidra_script["properties"]["script_args"] == {
+        "type": "array",
+        "items": {"type": "string"},
+    }
+
+    relocation_add = _tool_spec("relocation.add")
+    assert relocation_add["properties"]["values"] == {
+        "type": "array",
+        "items": {"type": "integer"},
+    }

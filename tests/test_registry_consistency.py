@@ -116,3 +116,46 @@ def test_canonical_category_families_replace_legacy_prefixes_when_present() -> N
         "data.",
     )
     assert not [name for name in tool_names if name.startswith(legacy_roots)]
+
+
+def _array_without_items(schema: object, path: str, issues: list[str]) -> None:
+    if not isinstance(schema, dict):
+        return
+    type_field = schema.get("type")
+    types = (
+        [type_field]
+        if isinstance(type_field, str)
+        else [item for item in type_field if isinstance(item, str)]
+        if isinstance(type_field, list)
+        else []
+    )
+    if (
+        "array" in types
+        and "items" not in schema
+        and not (schema.get("oneOf") or schema.get("anyOf"))
+    ):
+        issues.append(path)
+
+    for combinator in ("oneOf", "anyOf", "allOf"):
+        branches = schema.get(combinator)
+        if isinstance(branches, list):
+            for index, branch in enumerate(branches):
+                _array_without_items(branch, f"{path}.{combinator}[{index}]", issues)
+
+    properties = schema.get("properties")
+    if isinstance(properties, dict):
+        for name, subschema in properties.items():
+            _array_without_items(subschema, f"{path}.{name}", issues)
+
+    items = schema.get("items")
+    if isinstance(items, dict):
+        _array_without_items(items, f"{path}.items", issues)
+
+
+def test_array_schemas_declare_items() -> None:
+    """Strict JSON Schema clients reject array schemas without `items`."""
+    server = SimpleMcpServer(FakeGhidraBackend())
+    issues: list[str] = []
+    for tool in server._tool_definitions():
+        _array_without_items(tool["inputSchema"], tool["name"], issues)
+    assert not issues, "array schemas missing 'items': " + ", ".join(issues)
