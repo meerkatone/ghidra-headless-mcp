@@ -31,6 +31,8 @@ dev = [
 [project.scripts]
 ghidra_headless_mcp = "ghidra_headless_mcp.cli:main"
 ghidra-headless-mcp = "ghidra_headless_mcp.cli:main"
+ghidra_cli = "ghidra_headless_mcp.ghidra_cli:main"
+ghidra-cli = "ghidra_headless_mcp.ghidra_cli:main"
 
 [tool.setuptools]
 packages = ["ghidra_headless_mcp"]
@@ -71,6 +73,8 @@ ignore = [
 [tool.ruff.lint.per-file-ignores]
 "ghidra_headless_mcp/fake_ghidra.py" = ["PLR0915"]
 "ghidra_headless_mcp/fuzzer.py" = ["PLR0915"]
+"ghidra_headless_mcp/ghidra_cli.py" = ["PLR0915"]
+"ghidra_headless_mcp/cli_verify.py" = ["PLR0915"]
 "tests/test_all_tools_semantics.py" = ["PLR0915"]
 "tests/test_fake_backend_categories.py" = ["PLR0915"]
 

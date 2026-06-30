@@ -9,6 +9,7 @@ Scope for this matrix:
 - Categories covered here: `1` and `3` through `11`
 - Status is based on explicit MCP tools first
 - `ghidra.call`, `ghidra.eval`, and `ghidra.script` remain escape hatches, not category-complete coverage
+- Every tool below is also reachable from the `ghidra_cli` command-line client (same registry, identical results); see the README "Command-Line Client (ghidra_cli)" section
 
 ## Summary Matrix
 

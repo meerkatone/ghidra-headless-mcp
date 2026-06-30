@@ -14,21 +14,13 @@ from .fake_ghidra import FakeGhidraBackend
 from .server import SimpleMcpServer
 
 
-def build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(description="Ghidra Headless MCP server")
-    parser.add_argument(
-        "--version",
-        action="version",
-        version=f"%(prog)s {__version__}",
-    )
-    parser.add_argument(
-        "--transport",
-        choices=["stdio", "tcp"],
-        default="stdio",
-        help="Transport mode. stdio is default for MCP clients.",
-    )
-    parser.add_argument("--host", default="127.0.0.1", help="Host when using TCP transport")
-    parser.add_argument("--port", type=int, default=8765, help="Port when using TCP transport")
+def add_backend_args(parser: argparse.ArgumentParser) -> None:
+    """Add the shared backend-selection flags used by both the server and ghidra_cli.
+
+    These map directly onto :func:`build_backend`, which reads ``args.fake_backend``,
+    ``args.ghidra_install_dir``, and ``args.deterministic``.
+    """
+
     parser.add_argument(
         "--fake-backend",
         action="store_true",
@@ -44,6 +36,24 @@ def build_parser() -> argparse.ArgumentParser:
         default=True,
         help="Enable deterministic process-level startup behavior. Default: true.",
     )
+
+
+def build_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(description="Ghidra Headless MCP server")
+    parser.add_argument(
+        "--version",
+        action="version",
+        version=f"%(prog)s {__version__}",
+    )
+    parser.add_argument(
+        "--transport",
+        choices=["stdio", "tcp"],
+        default="stdio",
+        help="Transport mode. stdio is default for MCP clients.",
+    )
+    parser.add_argument("--host", default="127.0.0.1", help="Host when using TCP transport")
+    parser.add_argument("--port", type=int, default=8765, help="Port when using TCP transport")
+    add_backend_args(parser)
     return parser
 
 

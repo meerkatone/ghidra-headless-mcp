@@ -171,6 +171,111 @@ This repository is well tested and has enforced quality gates.
 - Fake backend coverage runs without requiring a Ghidra install.
 - Additional structural tests verify tool registry consistency, server behavior, and backend reachability.
 
+## Command-Line Client (ghidra_cli)
+
+`ghidra_cli` is a native command-line client that exposes **all** of the server's tools to agents
+and shells that do not speak the MCP protocol. It is a thin front end over the *same* dispatch code
+path as the MCP server, so results are identical to calling the tool over MCP. The tool catalog,
+parameters, and types are derived from the server's registry, so the CLI never drifts.
+
+Two execution modes:
+
+- **In-process** (default, no server needed): builds a backend in the CLI process and dispatches
+  directly. State is ephemeral per invocation — good for stateless calls, CI, and self-contained
+  `batch` sequences.
+- **Remote** (`--connect HOST:PORT`, or a managed background server): a JSON-RPC/TCP client to a
+  long-lived server, so **session state persists across invocations**. This is the recommended mode
+  for multi-step reverse engineering and the only practical mode for the real backend (whose JVM
+  startup is slow).
+
+### Quick start
+
+```bash
+# No server: one-shot, fake backend
+ghidra_cli --fake-backend call health.ping
+
+# Managed background server (persistent sessions), then drive it with plain calls:
+ghidra_cli --ghidra-install-dir /ABSOLUTE/PATH/TO/ghidra server start
+SID=$(ghidra_cli --field session_id call program.open --path /bin/ls)
+ghidra_cli call function.list --session-id "$SID" --limit 20
+ghidra_cli --field 'items.0.name' call function.list --session-id "$SID"
+ghidra_cli server stop
+```
+
+Once a managed server is running, `call`/`batch`/`raw`/`list` auto-connect to it. You can also point
+at any TCP server with `--connect 127.0.0.1:8765` or the `GHIDRA_CLI_CONNECT` env var, and set a
+default session with `--session-id` or `GHIDRA_CLI_SESSION`.
+
+### Verbs
+
+```
+ghidra_cli [GLOBAL OPTS] <verb> ...
+
+call <tool.name> [--param value ...]   Invoke one tool.
+list | tools  [--prefix P] [--query Q] [--offset N] [--limit N] [--names-only]
+describe <tool.name>                   Show description + parameters (type/required/default).
+raw <method> [--params JSON | --params-stdin] [--yes]   Send arbitrary JSON-RPC (bypasses coercion).
+batch [FILE|-] [--continue-on-error] [--no-autosession] [--close-after]
+server start|stop|status|restart [--host H] [--port P]
+
+GLOBAL OPTS (before the verb):
+  --connect HOST:PORT | --fake-backend | --ghidra-install-dir DIR | --in-process | --[no-]deterministic
+  --session-id ID            (default: $GHIDRA_CLI_SESSION)
+  --raw | --quiet | --field DOTPATH
+```
+
+`list` and `describe` answer locally from the tool registry, so they work without any backend.
+`batch` reads a JSONL stream of `{"tool": ..., "arguments": {...}}` and runs it against one
+transport in order; the most recent `session_id` is auto-threaded into later lines, making
+multi-step workflows possible without a running server.
+
+A complete, agent-oriented command reference listing **all 212 tools** — each with its description
+and exact `ghidra_cli call` invocation (parameters, types, defaults) — lives in
+[`GHIDRA_CLI.md`](GHIDRA_CLI.md). At runtime, `ghidra_cli list` and `ghidra_cli describe <tool>` are
+the always-current equivalents.
+
+### Passing arguments
+
+Each tool parameter maps to a `--flag`. Values are coerced from the tool's schema:
+
+| Parameter kind | How to pass it |
+| --- | --- |
+| string | `--name main` |
+| integer | `--limit 50`, `--offset 0x10` (accepts `0x`/`0o`/`0b`, else decimal) |
+| boolean | `--read-only false` (true/false/yes/no/on/off/1/0), or bare `--read-only` for true |
+| number | `--threshold 1.5` |
+| address | `--function_start 0x401000` — **passed through as a string** so Ghidra applies its own parsing (a bare-digit address is read as hex). For a decimal integer address use `--function_start:int 4198400`. |
+| array | repeat the flag: `--script_args a --script_args b`, or `--values:json '[1,2]'` |
+| object | `--kwargs:json '{"k": 1}'` |
+
+Extra controls:
+
+- **Full-args escape:** `--json '{...}'` (or `--json-stdin`) sets the whole arguments object; any
+  `--flag` overrides individual keys on top of it.
+- **Typed overrides:** `--key:TYPE value` with `TYPE` ∈ `str|int|float|bool|json|null`. `--key:null`
+  sets a JSON `null` (e.g. `variable.comment.set --comment:null` clears a comment).
+- **Value sources:** `--code @script.py` reads a file, `--code -` reads stdin — keeps large or
+  sensitive values out of `argv` (and process listings/shell history).
+
+### Output and exit codes
+
+Output goes to stdout (diagnostics to stderr): the tool's `structuredContent` as pretty JSON by
+default, `--raw` for the full result envelope, `--quiet` for the summary line, or `--field DOTPATH`
+to extract one value (e.g. `--field session_id`, `--field items.0.name`).
+
+- exit `0` — success
+- exit `1` — the tool ran but reported an error (`isError`)
+- exit `2` — usage/client error (unknown tool, bad flag/value, malformed `--json`) or a
+  connection/transport failure
+
+### Security
+
+All tools — including `ghidra.eval`, `ghidra.call`, and `ghidra.script`, which run arbitrary
+Python/Java/scripts inside the Ghidra runtime — are available with no extra flag, matching the MCP
+surface. The TCP/managed server binds `127.0.0.1` only and has **no authentication**: anyone with
+localhost access can run arbitrary code through it. Prefer `@file`/stdin value sources for code and
+secrets so they never appear in `argv`. `raw shutdown` against a shared server requires `--yes`.
+
 ## Context Controls
 
 - Read-only mode is the default for opened programs (`read_only=true`).
