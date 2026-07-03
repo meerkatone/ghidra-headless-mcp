@@ -6212,16 +6212,21 @@ class GhidraBackend:
     ) -> list[Any]:
         if limit <= 0:
             return []
-        pattern = " ".join(f"{byte:02x}" for byte in payload)
-        with suppress(Exception):
-            search_base = (
-                self._get_program(session_id).getMemory() if address_set is None else address_set
-            )
+        # Ghidra's findBytes treats the byteString as a regex over bytes, where
+        # literal bytes are written as \xNN escapes. Space-separated plain hex
+        # (e.g. "de ad be ef") is matched as the literal ASCII characters and
+        # never matches binary data, so the pattern must be \x-escaped.
+        pattern = "".join(f"\\x{byte:02x}" for byte in payload)
+        search_base = (
+            self._get_program(session_id).getMemory() if address_set is None else address_set
+        )
+        try:
             results = self._get_record(session_id).flat_api.findBytes(
                 search_base, pattern, limit, 1
             )
-            return [] if results is None else list(results)
-        return []
+        except Exception as exc:  # noqa: BLE001 - surface real backend failures
+            raise GhidraBackendError(f"byte search failed: {exc}") from exc
+        return [] if results is None else list(results)
 
     def _function_code_blocks(self, function: Any) -> list[Any]:
         from ghidra.program.model.block import BasicBlockModel

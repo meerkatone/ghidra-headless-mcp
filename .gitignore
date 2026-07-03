@@ -205,3 +205,9 @@ cython_debug/
 marimo/_static/
 marimo/_lsp/
 __marimo__/
+
+# macOS build artifacts
+#  .dSYM bundles are compiler-generated debug symbols that embed absolute build
+#  paths (e.g. from compiling tests/fixtures/hello.c); never commit them.
+.DS_Store
+*.dSYM/

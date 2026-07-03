@@ -163,6 +163,14 @@ def test_real_backend_navigation_disassembly_decompilation_and_xrefs(
         )
         assert linear["count"] >= 1
 
+        # search_bytes must find bytes that provably exist: read a few bytes at a
+        # known address and confirm the search locates that same address. This
+        # guards the \xNN pattern format in _find_byte_matches.
+        known_bytes = real_backend.memory_read(session_id, main_start, length=4)["data_hex"]
+        found = real_backend.search_bytes(session_id, pattern_hex=known_bytes)
+        assert found["count"] >= 1
+        assert main_start in {item["address"] for item in found["items"]}
+
         decomp = real_backend.decomp_function(session_id, main_start)
         assert decomp["decompile_completed"] is True
         assert "main" in decomp.get("c", "")
