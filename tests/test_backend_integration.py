@@ -4,7 +4,7 @@ import base64
 from pathlib import Path
 
 import pytest
-from ghidra_headless_mcp.backend import GhidraBackend
+from ghidra_headless_mcp.backend import GhidraBackend, GhidraBackendError
 
 pytestmark = pytest.mark.live
 
@@ -302,3 +302,84 @@ def test_real_backend_mutation_types_comments_memory_and_undo(
         assert real_backend._get_record(session_id).program.getCurrentTransactionInfo() is None
     finally:
         _backend_method(real_backend, "program_close", "session_close")(session_id)
+
+
+def test_real_backend_fixes_category_paths_typedefs_relocations_and_eval_mode(
+    real_backend: GhidraBackend,
+    sample_binary_path: str,
+) -> None:
+    """Regression coverage for the tool-taste fixes in backend.py."""
+    session_id: str | None = None
+    ro_session_id: str | None = None
+    try:
+        session_id = _open(real_backend, sample_binary_path, read_only=False)
+        ro_session_id = _open(real_backend, sample_binary_path, read_only=True)
+
+        # Category paths no longer require a leading '/'.
+        category = real_backend.type_category_create(session_id, path="TestCat")
+        assert category["category"]["path"] == "/TestCat"
+
+        # struct_create / enum_create / union_create normalize categories too.
+        struct = real_backend.struct_create(
+            session_id, name="TestStruct", category="TestCat", length=8
+        )
+        assert struct["type"]["path"] == "/TestCat/TestStruct"
+
+        # path + name resolve when path alone is a category, not a type.
+        fetched = real_backend.layout_struct_get(
+            session_id, struct_path="TestCat", struct_name="TestStruct"
+        )
+        assert fetched["type"]["name"] == "TestStruct"
+        fetched2 = real_backend.layout_struct_get(
+            session_id, struct_path="/TestCat", struct_name="TestStruct"
+        )
+        assert fetched2["type"]["name"] == "TestStruct"
+
+        # Full typedef struct declarations parse through the C parser.
+        defined = real_backend.type_define_c(
+            session_id, declaration="typedef struct { int x; char c; } Foo;"
+        )
+        assert defined["type"]["name"] == "Foo"
+        fetched_foo = real_backend.type_get(session_id, path="/Foo")
+        assert fetched_foo["type"]["name"] == "Foo"
+
+        # type.parse_c parses composites without committing, even read-only.
+        parsed = real_backend.type_parse_c(
+            ro_session_id, declaration="typedef struct { int y; } Bar;"
+        )
+        assert parsed["kind"] == "composite"
+        assert parsed["type"]["name"] == "Bar"
+        with pytest.raises(GhidraBackendError, match="type not found"):
+            real_backend.type_get(ro_session_id, path="/Bar")
+
+        # relocation.add validates the status enum name with a clear error.
+        with pytest.raises(GhidraBackendError, match="unsupported relocation status"):
+            real_backend.relocation_add(session_id, address=0x1000, status="UNRESOLVED")
+
+        # source.file.add resolves relative paths instead of throwing.
+        added = real_backend.source_file_add(session_id, path="src/relative.c")
+        assert any(item["path"].endswith("relative.c") for item in added["items"])
+        assert any(item["path"] != "src/relative.c" for item in added["items"])
+
+        # ghidra.eval no longer silently flips read-only sessions to writable.
+        record = real_backend._get_record(ro_session_id)
+        assert record.read_only is True
+        eval_payload = real_backend.eval_code("_ = 7", session_id=ro_session_id)
+        assert eval_payload["mode_transitioned"] is False
+        assert record.read_only is True
+        write_payload = real_backend.eval_code("_ = 8", session_id=ro_session_id, write=True)
+        assert write_payload["mode_transitioned"] is True
+        assert record.read_only is False
+
+        # Concurrent analysis on one session is rejected, not corrupted.
+        real_backend._get_record(session_id).last_analysis_status = "running"
+        with pytest.raises(GhidraBackendError, match="already running"):
+            real_backend.analysis_update_and_wait(session_id)
+        real_backend._get_record(session_id).last_analysis_status = "idle"
+    finally:
+        for sid in (ro_session_id, session_id):
+            if sid is not None:
+                try:
+                    _backend_method(real_backend, "program_close", "session_close")(sid)
+                except Exception:
+                    pass

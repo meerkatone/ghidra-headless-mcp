@@ -156,22 +156,44 @@ def test_tool_result_text_and_mode_transition(
     assert opened["content"][0]["text"].startswith("ok")
     session_id = opened["structuredContent"]["session_id"]
 
-    evaluated = _call_tool(
+    read_only_eval = _call_tool(
         fake_server,
         "ghidra.eval",
         {"session_id": session_id, "code": "print('stdout')\n_ = 7"},
         request_id=11,
     )
-    assert evaluated["structuredContent"]["result"] == 7
-    assert evaluated["structuredContent"]["mode_transitioned"] is True
-    assert evaluated["structuredContent"]["transitioned_session_ids"] == [session_id]
-    assert evaluated["structuredContent"]["stdout"] == "stdout\n"
+    assert read_only_eval["structuredContent"]["result"] == 7
+    assert read_only_eval["structuredContent"]["mode_transitioned"] is False
+    assert read_only_eval["structuredContent"]["transitioned_session_ids"] == []
+    assert read_only_eval["structuredContent"]["stdout"] == "stdout\n"
 
     mode = _call_tool(
         fake_server,
         _tool_name("program.mode.get", "program.mode", "session.mode"),
         {"session_id": session_id},
         request_id=12,
+    )
+    assert mode["structuredContent"]["read_only"] is True
+
+    write_eval = _call_tool(
+        fake_server,
+        "ghidra.eval",
+        {
+            "session_id": session_id,
+            "code": "_ = 7",
+            "write": True,
+        },
+        request_id=13,
+    )
+    assert write_eval["structuredContent"]["result"] == 7
+    assert write_eval["structuredContent"]["mode_transitioned"] is True
+    assert write_eval["structuredContent"]["transitioned_session_ids"] == [session_id]
+
+    mode = _call_tool(
+        fake_server,
+        _tool_name("program.mode.get", "program.mode", "session.mode"),
+        {"session_id": session_id},
+        request_id=14,
     )
     assert mode["structuredContent"]["read_only"] is False
 

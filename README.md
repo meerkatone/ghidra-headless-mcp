@@ -369,7 +369,7 @@ The server currently exposes `212` tools across `34` feature groups. The broader
 #### program
 - `program.close`: Close an open program session and release its associated resources.
 - `program.export_binary`: Export the program to disk as either the original-file format or raw bytes.
-- `program.image_base.set`: Change the program image base and optionally commit the rebasing operation.
+- `program.image_base.set`: Change the program image base (applied in memory; `commit` controls whether the change is recorded for undo).
 - `program.list_open`: List all program sessions currently held open by the server.
 - `program.mode.get`: Return whether a session is currently read-only or read-write.
 - `program.mode.set`: Switch a session between read-only and read-write mode.
@@ -580,7 +580,7 @@ The server currently exposes `212` tools across `34` feature groups. The broader
 - `type.get`: Return details for a data type by name or full path.
 - `type.get_by_id`: Look up a data type by internal ID, universal ID, or source archive ID.
 - `type.list`: List data types with filtering and pagination support.
-- `type.parse_c`: Parse a C declaration and return the resulting type without necessarily committing it.
+- `type.parse_c`: Parse a C declaration (including `typedef struct`/composite declarations) and return the resulting type without committing it.
 - `type.rename`: Rename an existing data type.
 - `type.source_archives.list`: List source archives referenced by the current data type manager.
 
