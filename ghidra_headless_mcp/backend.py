@@ -393,12 +393,8 @@ class GhidraBackend:
         return self.task_analysis_update(session_id)
 
     def analysis_update_and_wait(self, session_id: str) -> dict[str, Any]:
-        record = self._get_record(session_id)
+        record = self._begin_analysis(session_id)
         monitor = self._pyghidra.task_monitor(DEFAULT_ANALYSIS_TIMEOUT)
-        record.last_analysis_status = "running"
-        record.last_analysis_started_at = time.time()
-        record.last_analysis_completed_at = None
-        record.last_analysis_error = None
         try:
             log = self._analyze_program(record.program, monitor)
         except Exception as exc:
@@ -1256,10 +1252,21 @@ class GhidraBackend:
                     raise GhidraBackendError("failed to parse function declaration")
                 resolved = dtm.addDataType(func_def, DataTypeConflictHandler.DEFAULT_HANDLER)
                 return
+            if normalized.startswith("typedef"):
+                # A full typedef declaration names the type itself; let the
+                # C parser define it directly (e.g. "typedef struct { int x; }
+                # Foo;" or "typedef int myint;").
+                parsed = self._parse_data_type(session_id, normalized)
+                if name and parsed.getName() != name:
+                    parsed.setName(name)
+                resolved = dtm.addDataType(parsed, DataTypeConflictHandler.DEFAULT_HANDLER)
+                return
             if not name:
                 raise GhidraBackendError("name is required for non-function type definitions")
             base = self._parse_data_type(session_id, normalized)
-            typedef = TypedefDataType(CategoryPath(category), name, base, dtm)
+            typedef = TypedefDataType(
+                CategoryPath(self._normalize_category_path(category)), name, base, dtm
+            )
             resolved = dtm.addDataType(typedef, DataTypeConflictHandler.DEFAULT_HANDLER)
 
         self._with_write(session_id, f"Define type {name or declaration}", mutate)
@@ -1935,27 +1942,21 @@ class GhidraBackend:
     ) -> dict[str, Any]:
         if not declaration:
             raise GhidraBackendError("declaration is required")
-        # Composite types delegate to type_define_c which manages its own
-        # transaction via _with_write.  Handle that path *outside* any
-        # outer transaction so there is no nested-commit-then-rollback conflict.
-        if "{" in declaration and "}" in declaration:
-            parsed = self.type_define_c(
-                session_id,
-                declaration=declaration,
-                name=name,
-                category=category,
-            )["type"]
-            return {"session_id": session_id, "kind": "composite", "type": parsed}
-
-        # For read-only parsing paths, open a temporary transaction that is
-        # always rolled back (some Ghidra parsers mutate internal state).
+        # name/category are accepted for schema parity with type.define_c; the
+        # parsed type keeps the name declared in the declaration itself.
+        _ = name, category
+        # Open a temporary transaction that is always rolled back: some Ghidra
+        # parsers (including the full C parser used for composite/typedef
+        # declarations) register types with the dtm while parsing, and we want
+        # parse to be non-mutating.
         program = self._get_program(session_id)
         tx_id = int(program.startTransaction("Parse C type"))
         try:
-            if "(" in declaration and ")" in declaration:
+            normalized = declaration.strip().rstrip(";")
+            if "(" in normalized and ")" in normalized:
                 from ghidra.app.util.cparser.C import CParserUtils
 
-                definition = CParserUtils.parseSignature(None, program, declaration, False)
+                definition = CParserUtils.parseSignature(None, program, normalized, False)
                 if definition is None:
                     raise GhidraBackendError("failed to parse function declaration")
                 return {
@@ -1964,10 +1965,11 @@ class GhidraBackend:
                     "signature": definition.getPrototypeString(False),
                     "type": self._data_type_record(definition),
                 }
-            parsed = self._parse_data_type(session_id, declaration.strip().rstrip(";"))
+            parsed = self._parse_data_type(session_id, normalized)
+            kind = "composite" if "{" in normalized and "}" in normalized else "data_type"
             return {
                 "session_id": session_id,
-                "kind": "data_type",
+                "kind": kind,
                 "type": self._data_type_record(parsed),
             }
         finally:
@@ -2013,7 +2015,9 @@ class GhidraBackend:
             )
 
             dtm = self._get_program(session_id).getDataTypeManager()
-            struct = StructureDataType(CategoryPath(category), name, length, dtm)
+            struct = StructureDataType(
+                CategoryPath(self._normalize_category_path(category)), name, length, dtm
+            )
             created = dtm.addDataType(struct, DataTypeConflictHandler.DEFAULT_HANDLER)
 
         self._with_write(session_id, f"Create struct {name}", mutate)
@@ -2109,7 +2113,9 @@ class GhidraBackend:
             )
 
             dtm = self._get_program(session_id).getDataTypeManager()
-            enum_type = EnumDataType(CategoryPath(category), name, size, dtm)
+            enum_type = EnumDataType(
+                CategoryPath(self._normalize_category_path(category)), name, size, dtm
+            )
             created = dtm.addDataType(enum_type, DataTypeConflictHandler.DEFAULT_HANDLER)
 
         self._with_write(session_id, f"Create enum {name}", mutate)
@@ -2966,12 +2972,8 @@ class GhidraBackend:
         return payload
 
     def task_analysis_update(self, session_id: str) -> dict[str, Any]:
-        record = self._get_record(session_id)
+        record = self._begin_analysis(session_id)
         monitor = self._pyghidra.task_monitor(DEFAULT_ANALYSIS_TIMEOUT)
-        record.last_analysis_status = "running"
-        record.last_analysis_started_at = time.time()
-        record.last_analysis_completed_at = None
-        record.last_analysis_error = None
 
         def run() -> dict[str, Any]:
             try:
@@ -3061,6 +3063,7 @@ class GhidraBackend:
         args: list[Any] | None = None,
         kwargs: dict[str, Any] | None = None,
         session_id: str | None = None,
+        write: bool = False,
     ) -> dict[str, Any]:
         if not target:
             raise GhidraBackendError("target is required")
@@ -3069,14 +3072,19 @@ class GhidraBackend:
         root, attr_path = self._resolve_call_target(target, session_id)
         obj = self._resolve_attr_path(root, attr_path)
         transitioned_session_ids: list[str] = []
-        if session_id is not None and target.split(".", 1)[0] in {
-            "program",
-            "project",
-            "flat_api",
-            "decompiler",
-            "ghidra",
-            "java",
-        }:
+        if (
+            write
+            and session_id is not None
+            and target.split(".", 1)[0]
+            in {
+                "program",
+                "project",
+                "flat_api",
+                "decompiler",
+                "ghidra",
+                "java",
+            }
+        ):
             transitioned_session_ids = self._transition_sessions_to_writable([session_id])
         try:
             result = obj(*args, **kwargs) if callable(obj) else obj
@@ -3090,12 +3098,20 @@ class GhidraBackend:
             "transitioned_session_ids": transitioned_session_ids,
         }
 
-    def eval_code(self, code: str, *, session_id: str | None = None) -> dict[str, Any]:
+    def eval_code(
+        self,
+        code: str,
+        *,
+        session_id: str | None = None,
+        write: bool = False,
+    ) -> dict[str, Any]:
         if not code:
             raise GhidraBackendError("code is required")
         self._ensure_started()
         transition_candidates = [session_id] if session_id else sorted(self._sessions)
-        transitioned_session_ids = self._transition_sessions_to_writable(transition_candidates)
+        transitioned_session_ids = (
+            self._transition_sessions_to_writable(transition_candidates) if write else []
+        )
         context = self._eval_context(session_id)
         stdout_buffer = io.StringIO()
         stderr_buffer = io.StringIO()
@@ -3123,6 +3139,7 @@ class GhidraBackend:
         *,
         session_id: str | None = None,
         script_args: list[str] | None = None,
+        write: bool = False,
     ) -> dict[str, Any]:
         if not path:
             raise GhidraBackendError("path is required")
@@ -3130,7 +3147,9 @@ class GhidraBackend:
         if session_id is None:
             raise GhidraBackendError("session_id is required")
         record = self._get_record(session_id)
-        transitioned_session_ids = self._transition_sessions_to_writable([session_id])
+        transitioned_session_ids = (
+            self._transition_sessions_to_writable([session_id]) if write else []
+        )
         try:
             stdout_text, stderr_text = self._pyghidra.ghidra_script(
                 path,
@@ -4453,6 +4472,12 @@ class GhidraBackend:
             from ghidra.program.model.reloc import Relocation
             from jpype.types import JArray, JLong
 
+            valid_statuses = [str(item) for item in Relocation.Status.values()]
+            if status not in valid_statuses:
+                raise GhidraBackendError(
+                    "unsupported relocation status: "
+                    f"{status}; use one of: {', '.join(valid_statuses)}"
+                )
             relocation_status = getattr(Relocation.Status, status)
             self._get_program(session_id).getRelocationTable().add(
                 addr,
@@ -4834,7 +4859,7 @@ class GhidraBackend:
             created = (
                 self._get_program(session_id)
                 .getDataTypeManager()
-                .createCategory(CategoryPath(path))
+                .createCategory(CategoryPath(self._normalize_category_path(path)))
             )
 
         self._with_write(session_id, f"Create category {path}", mutate)
@@ -5049,7 +5074,7 @@ class GhidraBackend:
 
             dtm = self._get_program(session_id).getDataTypeManager()
             created = dtm.addDataType(
-                UnionDataType(CategoryPath(category), name, dtm),
+                UnionDataType(CategoryPath(self._normalize_category_path(category)), name, dtm),
                 DataTypeConflictHandler.DEFAULT_HANDLER,
             )
 
@@ -5763,6 +5788,26 @@ class GhidraBackend:
                 transitioned.append(session_id)
         return transitioned
 
+    def _begin_analysis(self, session_id: str) -> SessionRecord:
+        """Mark analysis as running, rejecting concurrent analysis on the same session.
+
+        Ghidra program transactions are not thread-safe, so two overlapping
+        analysis passes on one program (e.g. analysis.update and
+        analysis.update_and_wait) corrupt each other.
+        """
+        record = self._get_record(session_id)
+        with self._lock:
+            if record.last_analysis_status == "running":
+                raise GhidraBackendError(
+                    f"analysis is already running for session {session_id}; "
+                    "wait for it to complete before starting another"
+                )
+            record.last_analysis_status = "running"
+            record.last_analysis_started_at = time.time()
+            record.last_analysis_completed_at = None
+            record.last_analysis_error = None
+        return record
+
     def _analyze_program(self, program: Any, monitor: Any) -> str:
         from ghidra.app.plugin.core.analysis import AutoAnalysisManager
         from ghidra.program.util import GhidraProgramUtilities
@@ -5955,7 +6000,12 @@ class GhidraBackend:
     ) -> Any:
         dtm = self._get_program(session_id).getDataTypeManager()
         if path:
-            data_type = dtm.getDataType(path)
+            normalized_path = path if path.startswith("/") else "/" + path
+            data_type = dtm.getDataType(normalized_path)
+            if data_type is None and name:
+                # Accept a category path plus a type name (e.g.
+                # path="/TestCat", name="TestStruct").
+                data_type = dtm.getDataType(f"{normalized_path.rstrip('/')}/{name}")
             if data_type is None:
                 raise GhidraBackendError(f"type not found: {path}")
             return data_type
@@ -5976,10 +6026,32 @@ class GhidraBackend:
 
         dtm = self._get_program(session_id).getDataTypeManager()
         parser = DataTypeParser(dtm, dtm, None, DataTypeParser.AllowedDataTypes.ALL)
+        first_error: Exception | None = None
         try:
             return parser.parse(type_text)
         except Exception as exc:
-            raise GhidraBackendError(f"failed to parse data type '{type_text}': {exc}") from exc
+            first_error = exc
+        # Fall back to the full C parser for typedef/composite declarations
+        # (e.g. "typedef struct { int x; } Foo;") that DataTypeParser cannot
+        # handle.  Parsing registers types with the dtm, so callers must run
+        # this inside a transaction (type_define_c commits; type_parse_c rolls
+        # back).
+        from ghidra.app.util.cparser.C import CParser
+
+        try:
+            cparser = CParser(dtm)
+            # The full C parser is declaration-oriented and requires the
+            # terminating ';' that callers strip before invoking us.
+            c_text = type_text if type_text.endswith(";") else type_text + ";"
+            result = cparser.parse(c_text)
+        except Exception as exc:
+            detail = f"{first_error}; {exc}" if first_error is not None else str(exc)
+            raise GhidraBackendError(f"failed to parse data type '{type_text}': {detail}") from exc
+        if result is not None:
+            return result
+        if cparser.getLastDataType() is not None:
+            return cparser.getLastDataType()
+        raise GhidraBackendError(f"failed to parse data type '{type_text}'")
 
     def _get_all_data_types(self, session_id: str) -> list[Any]:
         from java.util import ArrayList
@@ -6586,8 +6658,11 @@ class GhidraBackend:
             raise GhidraBackendError("path is required")
         from ghidra.program.database.sourcemap import SourceFile, SourceFileIdType
 
+        # Ghidra SourceFile rejects relative paths, so resolve them against the
+        # current working directory before handing them over.
+        source_path = path if os.path.isabs(path) else os.path.abspath(path)
         if id_type is None:
-            return SourceFile(path)
+            return SourceFile(source_path)
         candidate = id_type.upper()
         if not hasattr(SourceFileIdType, candidate):
             raise GhidraBackendError(f"unsupported id_type: {id_type}")
@@ -6595,11 +6670,12 @@ class GhidraBackend:
             identifier = None if identifier_hex is None else bytes.fromhex(identifier_hex)
         except ValueError as exc:
             raise GhidraBackendError(f"invalid identifier_hex: {exc}") from exc
-        return SourceFile(path, getattr(SourceFileIdType, candidate), identifier)
+        return SourceFile(source_path, getattr(SourceFileIdType, candidate), identifier)
 
     def _find_source_file(self, manager: Any, path: str) -> Any:
+        normalized = path if os.path.isabs(path) else os.path.abspath(path)
         for source_file in manager.getAllSourceFiles():
-            if source_file.getPath() == path:
+            if source_file.getPath() in {path, normalized}:
                 return source_file
         raise GhidraBackendError(f"source file not found: {path}")
 
@@ -6715,13 +6791,24 @@ class GhidraBackend:
 
         self._with_write(session_id, f"Update parameters {function.getName()}", mutate)
 
+    def _normalize_category_path(self, path: str) -> str:
+        """Normalize a user-supplied category path to Ghidra's absolute form.
+
+        Ghidra CategoryPath requires a leading '/', but callers should not
+        need to remember that (e.g. "TestCat" -> "/TestCat").
+        """
+        path = path.strip()
+        if path in {"", "/"}:
+            return "/"
+        return path if path.startswith("/") else "/" + path
+
     def _resolve_category(self, session_id: str, path: str) -> Any:
         dtm = self._get_program(session_id).getDataTypeManager()
         if path in {"", "/"}:
             return dtm.getRootCategory()
         from ghidra.program.model.data import CategoryPath
 
-        category = dtm.getCategory(CategoryPath(path))
+        category = dtm.getCategory(CategoryPath(self._normalize_category_path(path)))
         if category is None:
             raise GhidraBackendError(f"category not found: {path}")
         return category
@@ -6830,6 +6917,10 @@ class GhidraBackend:
         if not global_only:
             symbols.extend(list(high_function.getLocalSymbolMap().getSymbols()))
         symbols.extend(list(high_function.getGlobalSymbolMap().getSymbols()))
+
+        def _normalize_storage(value: Any) -> str:
+            return str(value).lower().replace(" ", "").replace("\t", "")
+
         matches = []
         for symbol in symbols:
             if symbol is None:
@@ -6838,12 +6929,24 @@ class GhidraBackend:
                 continue
             if ordinal is not None and int(symbol.getCategoryIndex()) != ordinal:
                 continue
-            if storage is not None and str(symbol.getStorage()) != storage:
+            if storage is not None and _normalize_storage(
+                symbol.getStorage()
+            ) != _normalize_storage(storage):
                 continue
             if global_only and not symbol.isGlobal():
                 continue
             matches.append(symbol)
         if not matches:
+            if storage is not None:
+                candidates = [
+                    f"{symbol.getName()} (ordinal={int(symbol.getCategoryIndex())}, "
+                    f"storage={symbol.getStorage()})"
+                    for symbol in symbols[:10]
+                ]
+                raise GhidraBackendError(
+                    f"no decompiler symbol matches name={name!r} ordinal={ordinal!r} "
+                    f"storage={storage!r}; available symbols: {', '.join(candidates)}"
+                )
             return None
         if len(matches) > 1:
             raise GhidraBackendError("decompiler symbol selection is ambiguous")

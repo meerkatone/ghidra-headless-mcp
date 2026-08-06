@@ -15,3 +15,12 @@ The format is based on Keep a Changelog, and this project uses Semantic Versioni
 ### Changed
 - Pytest now distinguishes `live`, `slow`, and `socket` coverage so CI can run the right gates for each environment.
 - Ruff policy now targets real defects while allowing the intentional large dispatcher-style modules and scenario-style tests.
+- `ghidra.eval`, `ghidra.call`, and `ghidra.script` no longer silently transition read-only sessions to writable; pass `write=true` to opt in.
+
+### Fixed
+- Concurrent auto-analysis on the same session is rejected with a clear error instead of corrupting Ghidra's transaction stack.
+- Category paths accept a leading-`/`-less form in `type.category.create`, `type.define_c`, `struct.create`, `enum.create`, `union.create`, and type lookups (path + name).
+- `type.define_c`/`type.parse_c` now parse full `typedef struct { ... }` and other composite declarations via the C parser; `type.parse_c` is non-mutating and works on read-only sessions.
+- `relocation.add` validates the status enum and reports the supported values instead of a raw `AttributeError`.
+- `source.file.add` resolves relative paths to absolute instead of failing with Ghidra's `IllegalArgumentException`.
+- Decompiler high-symbol lookups match storage case-insensitively and report candidate symbols when nothing matches.

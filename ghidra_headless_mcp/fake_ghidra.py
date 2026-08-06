@@ -1149,8 +1149,9 @@ class FakeGhidraBackend:
         args: list[Any] | None = None,
         kwargs: dict[str, Any] | None = None,
         session_id: str | None = None,
+        write: bool = False,
     ) -> dict[str, Any]:
-        transitioned = self._transition(session_id)
+        transitioned = self._transition(session_id) if write else []
         return {
             "target": target,
             "callable": True,
@@ -1159,8 +1160,14 @@ class FakeGhidraBackend:
             "transitioned_session_ids": transitioned,
         }
 
-    def eval_code(self, code: str, *, session_id: str | None = None) -> dict[str, Any]:
-        transitioned = self._transition(session_id)
+    def eval_code(
+        self,
+        code: str,
+        *,
+        session_id: str | None = None,
+        write: bool = False,
+    ) -> dict[str, Any]:
+        transitioned = self._transition(session_id) if write else []
         context: dict[str, Any] = {
             "sessions": list(self._sessions),
             "session_id": session_id,
@@ -1189,11 +1196,16 @@ class FakeGhidraBackend:
         return payload
 
     def run_script(
-        self, path: str, *, session_id: str | None = None, script_args: list[str] | None = None
+        self,
+        path: str,
+        *,
+        session_id: str | None = None,
+        script_args: list[str] | None = None,
+        write: bool = False,
     ) -> dict[str, Any]:
         if session_id is None:
             raise GhidraBackendError("session_id is required")
-        transitioned = self._transition(session_id)
+        transitioned = self._transition(session_id) if write else []
         return {
             "path": path,
             "session_id": session_id,
