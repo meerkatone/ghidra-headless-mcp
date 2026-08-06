@@ -394,7 +394,11 @@ class GhidraBackend:
 
     def analysis_update_and_wait(self, session_id: str) -> dict[str, Any]:
         record = self._begin_analysis(session_id)
-        monitor = self._pyghidra.task_monitor(DEFAULT_ANALYSIS_TIMEOUT)
+        try:
+            monitor = self._pyghidra.task_monitor(DEFAULT_ANALYSIS_TIMEOUT)
+        except Exception as exc:
+            self._fail_analysis_start(record, exc)
+            raise GhidraBackendError(f"failed to create analysis monitor: {exc}") from exc
         try:
             log = self._analyze_program(record.program, monitor)
         except Exception as exc:
@@ -1244,6 +1248,14 @@ class GhidraBackend:
 
             dtm = self._get_program(session_id).getDataTypeManager()
             normalized = declaration.strip().rstrip(";")
+            if self._is_full_c_declaration(normalized):
+                parsed = self._parse_c_declaration(session_id, normalized)
+                chosen_name = name or parsed.getName()
+                parsed.setNameAndCategory(
+                    CategoryPath(self._normalize_category_path(category)), chosen_name
+                )
+                resolved = dtm.addDataType(parsed, DataTypeConflictHandler.DEFAULT_HANDLER)
+                return
             if "(" in normalized and ")" in normalized:
                 func_def = CParserUtils.parseSignature(
                     None, self._get_program(session_id), normalized, False
@@ -1251,15 +1263,6 @@ class GhidraBackend:
                 if func_def is None:
                     raise GhidraBackendError("failed to parse function declaration")
                 resolved = dtm.addDataType(func_def, DataTypeConflictHandler.DEFAULT_HANDLER)
-                return
-            if normalized.startswith("typedef"):
-                # A full typedef declaration names the type itself; let the
-                # C parser define it directly (e.g. "typedef struct { int x; }
-                # Foo;" or "typedef int myint;").
-                parsed = self._parse_data_type(session_id, normalized)
-                if name and parsed.getName() != name:
-                    parsed.setName(name)
-                resolved = dtm.addDataType(parsed, DataTypeConflictHandler.DEFAULT_HANDLER)
                 return
             if not name:
                 raise GhidraBackendError("name is required for non-function type definitions")
@@ -1942,9 +1945,11 @@ class GhidraBackend:
     ) -> dict[str, Any]:
         if not declaration:
             raise GhidraBackendError("declaration is required")
-        # name/category are accepted for schema parity with type.define_c; the
-        # parsed type keeps the name declared in the declaration itself.
-        _ = name, category
+        record = self._get_record(session_id)
+        if record.active_transaction_id is not None:
+            raise GhidraBackendError(
+                "type.parse_c cannot run during an active transaction; commit or revert it first"
+            )
         # Open a temporary transaction that is always rolled back: some Ghidra
         # parsers (including the full C parser used for composite/typedef
         # declarations) register types with the dtm while parsing, and we want
@@ -1953,6 +1958,20 @@ class GhidraBackend:
         tx_id = int(program.startTransaction("Parse C type"))
         try:
             normalized = declaration.strip().rstrip(";")
+            if self._is_full_c_declaration(normalized):
+                parsed = self._parse_c_declaration(session_id, normalized)
+                if name is not None or self._normalize_category_path(category) != "/":
+                    from ghidra.program.model.data import CategoryPath
+
+                    parsed.setNameAndCategory(
+                        CategoryPath(self._normalize_category_path(category)),
+                        name or parsed.getName(),
+                    )
+                return {
+                    "session_id": session_id,
+                    "kind": "composite" if "{" in normalized else "data_type",
+                    "type": self._data_type_record(parsed),
+                }
             if "(" in normalized and ")" in normalized:
                 from ghidra.app.util.cparser.C import CParserUtils
 
@@ -1966,10 +1985,9 @@ class GhidraBackend:
                     "type": self._data_type_record(definition),
                 }
             parsed = self._parse_data_type(session_id, normalized)
-            kind = "composite" if "{" in normalized and "}" in normalized else "data_type"
             return {
                 "session_id": session_id,
-                "kind": kind,
+                "kind": "data_type",
                 "type": self._data_type_record(parsed),
             }
         finally:
@@ -2973,7 +2991,11 @@ class GhidraBackend:
 
     def task_analysis_update(self, session_id: str) -> dict[str, Any]:
         record = self._begin_analysis(session_id)
-        monitor = self._pyghidra.task_monitor(DEFAULT_ANALYSIS_TIMEOUT)
+        try:
+            monitor = self._pyghidra.task_monitor(DEFAULT_ANALYSIS_TIMEOUT)
+        except Exception as exc:
+            self._fail_analysis_start(record, exc)
+            raise GhidraBackendError(f"failed to create analysis monitor: {exc}") from exc
 
         def run() -> dict[str, Any]:
             try:
@@ -2993,13 +3015,21 @@ class GhidraBackend:
                 "log": record.last_analysis_log,
             }
 
-        payload = self._submit_task(
-            kind="analysis.update_and_wait",
-            session_id=session_id,
-            func=run,
-            cancel_hook=lambda: monitor.cancel(),
-        )
+        try:
+            payload = self._submit_task(
+                kind="analysis.update_and_wait",
+                session_id=session_id,
+                func=run,
+                cancel_hook=lambda: monitor.cancel(),
+            )
+        except Exception as exc:
+            self._fail_analysis_start(record, exc)
+            raise GhidraBackendError(f"failed to submit analysis task: {exc}") from exc
         record.last_analysis_task_id = payload["task_id"]
+        task = self._get_task(payload["task_id"])
+        task.future.add_done_callback(
+            lambda future: self._finalize_cancelled_analysis(record, payload["task_id"], future)
+        )
         return payload
 
     def task_status(self, task_id: str) -> dict[str, Any]:
@@ -3069,23 +3099,9 @@ class GhidraBackend:
             raise GhidraBackendError("target is required")
         args = args or []
         kwargs = kwargs or {}
+        transitioned_session_ids = self._prepare_raw_access(session_id, write=write)
         root, attr_path = self._resolve_call_target(target, session_id)
         obj = self._resolve_attr_path(root, attr_path)
-        transitioned_session_ids: list[str] = []
-        if (
-            write
-            and session_id is not None
-            and target.split(".", 1)[0]
-            in {
-                "program",
-                "project",
-                "flat_api",
-                "decompiler",
-                "ghidra",
-                "java",
-            }
-        ):
-            transitioned_session_ids = self._transition_sessions_to_writable([session_id])
         try:
             result = obj(*args, **kwargs) if callable(obj) else obj
         except Exception as exc:
@@ -3108,11 +3124,15 @@ class GhidraBackend:
         if not code:
             raise GhidraBackendError("code is required")
         self._ensure_started()
-        transition_candidates = [session_id] if session_id else sorted(self._sessions)
-        transitioned_session_ids = (
-            self._transition_sessions_to_writable(transition_candidates) if write else []
+        transitioned_session_ids = self._prepare_raw_access(
+            session_id,
+            write=write,
+            all_sessions=write and session_id is None,
         )
-        context = self._eval_context(session_id)
+        context = self._eval_context(
+            session_id,
+            expose_sessions=write or session_id is not None,
+        )
         stdout_buffer = io.StringIO()
         stderr_buffer = io.StringIO()
         with redirect_stdout(stdout_buffer), redirect_stderr(stderr_buffer):
@@ -3147,9 +3167,7 @@ class GhidraBackend:
         if session_id is None:
             raise GhidraBackendError("session_id is required")
         record = self._get_record(session_id)
-        transitioned_session_ids = (
-            self._transition_sessions_to_writable([session_id]) if write else []
-        )
+        transitioned_session_ids = self._prepare_raw_access(session_id, write=write)
         try:
             stdout_text, stderr_text = self._pyghidra.ghidra_script(
                 path,
@@ -5788,6 +5806,24 @@ class GhidraBackend:
                 transitioned.append(session_id)
         return transitioned
 
+    def _prepare_raw_access(
+        self,
+        session_id: str | None,
+        *,
+        write: bool,
+        all_sessions: bool = False,
+    ) -> list[str]:
+        if all_sessions:
+            return self._transition_sessions_to_writable(sorted(self._sessions))
+        if session_id is None:
+            return []
+        record = self._get_record(session_id)
+        if record.read_only and not write:
+            raise GhidraBackendError(
+                f"session {session_id} is read-only; pass write=true to use raw Ghidra tools"
+            )
+        return self._transition_sessions_to_writable([session_id]) if write else []
+
     def _begin_analysis(self, session_id: str) -> SessionRecord:
         """Mark analysis as running, rejecting concurrent analysis on the same session.
 
@@ -5806,7 +5842,29 @@ class GhidraBackend:
             record.last_analysis_started_at = time.time()
             record.last_analysis_completed_at = None
             record.last_analysis_error = None
+            record.last_analysis_task_id = None
         return record
+
+    def _fail_analysis_start(self, record: SessionRecord, exc: Exception) -> None:
+        with self._lock:
+            record.last_analysis_status = "failed"
+            record.last_analysis_completed_at = time.time()
+            record.last_analysis_error = str(exc)
+
+    def _finalize_cancelled_analysis(
+        self,
+        record: SessionRecord,
+        task_id: str,
+        future: Future[Any],
+    ) -> None:
+        if not future.cancelled():
+            return
+        with self._lock:
+            if record.last_analysis_task_id != task_id or record.last_analysis_status != "running":
+                return
+            record.last_analysis_status = "cancelled"
+            record.last_analysis_completed_at = time.time()
+            record.last_analysis_error = None
 
     def _analyze_program(self, program: Any, monitor: Any) -> str:
         from ghidra.app.plugin.core.analysis import AutoAnalysisManager
@@ -6026,32 +6084,33 @@ class GhidraBackend:
 
         dtm = self._get_program(session_id).getDataTypeManager()
         parser = DataTypeParser(dtm, dtm, None, DataTypeParser.AllowedDataTypes.ALL)
-        first_error: Exception | None = None
         try:
             return parser.parse(type_text)
         except Exception as exc:
-            first_error = exc
-        # Fall back to the full C parser for typedef/composite declarations
-        # (e.g. "typedef struct { int x; } Foo;") that DataTypeParser cannot
-        # handle.  Parsing registers types with the dtm, so callers must run
-        # this inside a transaction (type_define_c commits; type_parse_c rolls
-        # back).
+            raise GhidraBackendError(f"failed to parse data type '{type_text}': {exc}") from exc
+
+    def _parse_c_declaration(self, session_id: str, declaration: str) -> Any:
         from ghidra.app.util.cparser.C import CParser
 
+        dtm = self._get_program(session_id).getDataTypeManager()
         try:
             cparser = CParser(dtm)
-            # The full C parser is declaration-oriented and requires the
-            # terminating ';' that callers strip before invoking us.
-            c_text = type_text if type_text.endswith(";") else type_text + ";"
+            c_text = declaration if declaration.endswith(";") else declaration + ";"
             result = cparser.parse(c_text)
         except Exception as exc:
-            detail = f"{first_error}; {exc}" if first_error is not None else str(exc)
-            raise GhidraBackendError(f"failed to parse data type '{type_text}': {detail}") from exc
+            raise GhidraBackendError(
+                f"failed to parse C declaration '{declaration}': {exc}"
+            ) from exc
         if result is not None:
             return result
         if cparser.getLastDataType() is not None:
             return cparser.getLastDataType()
-        raise GhidraBackendError(f"failed to parse data type '{type_text}'")
+        raise GhidraBackendError(f"failed to parse C declaration '{declaration}'")
+
+    @staticmethod
+    def _is_full_c_declaration(declaration: str) -> bool:
+        normalized = declaration.lstrip()
+        return re.match(r"typedef\b", normalized) is not None or "{" in normalized
 
     def _get_all_data_types(self, session_id: str) -> list[Any]:
         from java.util import ArrayList
@@ -6296,7 +6355,7 @@ class GhidraBackend:
             results = self._get_record(session_id).flat_api.findBytes(
                 search_base, pattern, limit, 1
             )
-        except Exception as exc:  # noqa: BLE001 - surface real backend failures
+        except Exception as exc:
             raise GhidraBackendError(f"byte search failed: {exc}") from exc
         return [] if results is None else list(results)
 
@@ -7156,7 +7215,12 @@ class GhidraBackend:
             obj = getattr(obj, part)
         return obj
 
-    def _eval_context(self, session_id: str | None) -> dict[str, Any]:
+    def _eval_context(
+        self,
+        session_id: str | None,
+        *,
+        expose_sessions: bool = True,
+    ) -> dict[str, Any]:
         self._ensure_started()
         import ghidra
         import java
@@ -7165,7 +7229,11 @@ class GhidraBackend:
             "pyghidra": self._pyghidra,
             "ghidra": ghidra,
             "java": java,
-            "sessions": {sid: record.program for sid, record in self._sessions.items()},
+            "sessions": {
+                sid: record.program
+                for sid, record in self._sessions.items()
+                if expose_sessions and not record.read_only
+            },
         }
         if session_id is not None:
             record = self._get_record(session_id)

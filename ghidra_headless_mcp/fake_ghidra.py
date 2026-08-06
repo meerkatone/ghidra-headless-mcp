@@ -1135,6 +1135,8 @@ class FakeGhidraBackend:
         task = self._get_task(task_id)
         task.cancel_requested = True
         task.status = "cancelled"
+        if task.session_id is not None:
+            self._get_session(task.session_id).analysis_status = "cancelled"
         return {
             "task_id": task_id,
             "cancel_requested": True,
@@ -1151,7 +1153,7 @@ class FakeGhidraBackend:
         session_id: str | None = None,
         write: bool = False,
     ) -> dict[str, Any]:
-        transitioned = self._transition(session_id) if write else []
+        transitioned = self._prepare_raw_access(session_id, write=write)
         return {
             "target": target,
             "callable": True,
@@ -1167,9 +1169,17 @@ class FakeGhidraBackend:
         session_id: str | None = None,
         write: bool = False,
     ) -> dict[str, Any]:
-        transitioned = self._transition(session_id) if write else []
+        transitioned = self._prepare_raw_access(
+            session_id,
+            write=write,
+            all_sessions=write and session_id is None,
+        )
         context: dict[str, Any] = {
-            "sessions": list(self._sessions),
+            "sessions": [
+                sid
+                for sid, record in self._sessions.items()
+                if (write or session_id is not None) and not record.read_only
+            ],
             "session_id": session_id,
             "backend": self,
         }
@@ -1205,7 +1215,7 @@ class FakeGhidraBackend:
     ) -> dict[str, Any]:
         if session_id is None:
             raise GhidraBackendError("session_id is required")
-        transitioned = self._transition(session_id) if write else []
+        transitioned = self._prepare_raw_access(session_id, write=write)
         return {
             "path": path,
             "session_id": session_id,
@@ -1427,6 +1437,27 @@ class FakeGhidraBackend:
             record.read_only = False
             return [session_id]
         return []
+
+    def _prepare_raw_access(
+        self,
+        session_id: str | None,
+        *,
+        write: bool,
+        all_sessions: bool = False,
+    ) -> list[str]:
+        if all_sessions:
+            transitioned: list[str] = []
+            for candidate in sorted(self._sessions):
+                transitioned.extend(self._transition(candidate))
+            return transitioned
+        if session_id is None:
+            return []
+        record = self._get_session(session_id)
+        if record.read_only and not write:
+            raise GhidraBackendError(
+                f"session {session_id} is read-only; pass write=true to use raw Ghidra tools"
+            )
+        return self._transition(session_id) if write else []
 
     def _require_writable(self, record: _FakeSession) -> None:
         if record.read_only:

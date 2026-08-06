@@ -20,6 +20,10 @@ from .fuzz_support import (
 )
 from .server import ALL_TOOL_SPECS, SimpleMcpServer
 
+LIVE_TASK_TIMEOUT_SECS = 5 * 60
+LIVE_TASK_POLL_INTERVAL_SECS = 0.1
+TERMINAL_TASK_STATUSES = frozenset({"completed", "failed", "cancelled"})
+
 SAFE_BOOL_MUTATIONS = {
     "case_sensitive",
     "clear",
@@ -355,6 +359,8 @@ def _prepare_context(ctx: ToolContext, tool_name: str) -> None:
         return
     if tool_name in {"task.status", "task.result", "task.cancel"}:
         ctx.task_id = ctx.backend.task_analysis_update(ctx.session_id)["task_id"]
+        if tool_name == "task.result":
+            _wait_for_live_task_terminal(ctx, ctx.task_id)
     if tool_name == "memory.block.remove":
         ctx.backend.memory_block_create(
             ctx.session_id,
@@ -373,18 +379,44 @@ def _prepare_context(ctx: ToolContext, tool_name: str) -> None:
         ctx.backend.source_file_add(ctx.session_id, path=ctx.live_case.created_source_path)
 
 
+def _wait_for_live_task_terminal(
+    ctx: ToolContext,
+    task_id: str,
+    *,
+    timeout_secs: float = LIVE_TASK_TIMEOUT_SECS,
+) -> dict[str, Any]:
+    deadline = time.monotonic() + timeout_secs
+    while True:
+        status = ctx.backend.task_status(task_id)
+        if status.get("status") in TERMINAL_TASK_STATUSES:
+            return status
+        if time.monotonic() >= deadline:
+            raise RuntimeError(
+                f"task {task_id} did not reach a terminal state within "
+                f"{timeout_secs:g} seconds (last_status={status.get('status', 'unknown')})"
+            )
+        time.sleep(LIVE_TASK_POLL_INTERVAL_SECS)
+
+
 def _stabilize_live_result(ctx: ToolContext, tool_name: str, result: dict[str, Any]) -> None:
     if ctx.mode != "live":
         return
     structured = result.get("structuredContent") or {}
     if tool_name in {"analysis.update", "task.analysis_update"} and structured.get("task_id"):
-        task_id = str(structured["task_id"])
-        deadline = time.time() + 30
-        while time.time() < deadline:
-            status = ctx.backend.task_status(task_id)["status"]
-            if status in {"completed", "failed", "cancelled"}:
-                break
-            time.sleep(0.1)
+        _wait_for_live_task_terminal(ctx, str(structured["task_id"]))
+
+
+def _cleanup_live_task_case(ctx: ToolContext, tool_name: str) -> None:
+    if ctx.mode != "live" or ctx.task_id is None:
+        return
+    if tool_name not in {"task.status", "task.cancel"}:
+        return
+
+    status = ctx.backend.task_status(ctx.task_id)
+    if status.get("status") in TERMINAL_TASK_STATUSES:
+        return
+    ctx.backend.task_cancel(ctx.task_id)
+    _wait_for_live_task_terminal(ctx, ctx.task_id)
 
 
 def run(
@@ -415,13 +447,13 @@ def run(
             )
         for spec in selected_specs:
             for round_index in range(rounds):
+                tool_name = spec["name"]
                 ctx = (
                     create_live_tool_context(env, seed=True)
                     if backend_mode == "live"
                     else create_tool_context(seed=True, sample_path=resolved_sample_path)
                 )
                 try:
-                    tool_name = spec["name"]
                     _prepare_context(ctx, tool_name)
                     arguments = _arguments_for_case(
                         spec,
@@ -448,6 +480,7 @@ def run(
                                 f"fuzzer failed for {tool_name} round={round_index}: {case['summary']}"
                             )
                 finally:
+                    _cleanup_live_task_case(ctx, tool_name)
                     if ctx.cleanup is not None:
                         ctx.cleanup()
     finally:

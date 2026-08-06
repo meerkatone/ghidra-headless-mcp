@@ -279,6 +279,8 @@ secrets so they never appear in `argv`. `raw shutdown` against a shared server r
 ## Context Controls
 
 - Read-only mode is the default for opened programs (`read_only=true`).
+- Raw scripting/API tools reject read-only program sessions unless `write=true`; this guard protects
+  program-session state but does not sandbox Python, Java, filesystem, or process access.
 - Deterministic process-level startup is enabled by default and can be disabled with `--no-deterministic`.
 - Many list/search surfaces are paginated with `offset` and `limit`.
 

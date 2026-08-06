@@ -162,16 +162,30 @@ def test_tool_result_text_and_mode_transition(
         {"session_id": session_id, "code": "print('stdout')\n_ = 7"},
         request_id=11,
     )
-    assert read_only_eval["structuredContent"]["result"] == 7
-    assert read_only_eval["structuredContent"]["mode_transitioned"] is False
-    assert read_only_eval["structuredContent"]["transitioned_session_ids"] == []
-    assert read_only_eval["structuredContent"]["stdout"] == "stdout\n"
+    assert read_only_eval["isError"] is True
+    assert "pass write=true" in read_only_eval["structuredContent"]["error"]
+
+    read_only_call = _call_tool(
+        fake_server,
+        "ghidra.call",
+        {"session_id": session_id, "target": "fake.target"},
+        request_id=12,
+    )
+    assert read_only_call["isError"] is True
+
+    read_only_script = _call_tool(
+        fake_server,
+        "ghidra.script",
+        {"session_id": session_id, "path": "/tmp/demo.py"},
+        request_id=13,
+    )
+    assert read_only_script["isError"] is True
 
     mode = _call_tool(
         fake_server,
         _tool_name("program.mode.get", "program.mode", "session.mode"),
         {"session_id": session_id},
-        request_id=12,
+        request_id=14,
     )
     assert mode["structuredContent"]["read_only"] is True
 
@@ -183,7 +197,7 @@ def test_tool_result_text_and_mode_transition(
             "code": "_ = 7",
             "write": True,
         },
-        request_id=13,
+        request_id=15,
     )
     assert write_eval["structuredContent"]["result"] == 7
     assert write_eval["structuredContent"]["mode_transitioned"] is True
@@ -193,7 +207,7 @@ def test_tool_result_text_and_mode_transition(
         fake_server,
         _tool_name("program.mode.get", "program.mode", "session.mode"),
         {"session_id": session_id},
-        request_id=14,
+        request_id=16,
     )
     assert mode["structuredContent"]["read_only"] is False
 

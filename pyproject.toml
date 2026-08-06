@@ -76,6 +76,7 @@ ignore = [
 "ghidra_headless_mcp/ghidra_cli.py" = ["PLR0915"]
 "ghidra_headless_mcp/cli_verify.py" = ["PLR0915"]
 "tests/test_all_tools_semantics.py" = ["PLR0915"]
+"tests/test_backend_integration.py" = ["PLR0915"]
 "tests/test_fake_backend_categories.py" = ["PLR0915"]
 
 [tool.ruff.format]

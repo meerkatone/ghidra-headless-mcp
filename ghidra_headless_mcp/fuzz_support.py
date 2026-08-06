@@ -18,6 +18,8 @@ from .server import ALL_TOOL_SPECS, SimpleMcpServer
 
 TOOL_SPECS_BY_NAME = {spec["name"]: spec for spec in ALL_TOOL_SPECS}
 DEFAULT_SAMPLE_BINARY_PATH = Path(__file__).resolve().parents[1] / "samples" / "ls"
+LIVE_SEED_DECOMPILER_TIMEOUT_SECS = 120
+TASK_ID_TOOL_NAMES = frozenset({"task.cancel", "task.result", "task.status"})
 
 
 @dataclass
@@ -425,6 +427,7 @@ def _select_decompiler_struct_symbol(
             name=candidate_name,
             ordinal=None,
             storage=None,
+            timeout_secs=LIVE_SEED_DECOMPILER_TIMEOUT_SECS,
         )
         if high_symbol is None or high_symbol.getHighVariable() is None:
             continue
@@ -479,7 +482,9 @@ def _derive_live_seed_state(
     param_function, param_name = _select_param_function(backend, session_id, functions)
     local_function, local_name = _select_local_function(backend, session_id, functions)
     primary_summary = backend.decomp_high_function_summary(
-        session_id, function_start=primary["entry_point"]
+        session_id,
+        function_start=primary["entry_point"],
+        timeout_secs=LIVE_SEED_DECOMPILER_TIMEOUT_SECS,
     )
     local_symbols = [
         item
@@ -1094,6 +1099,10 @@ def _ensure_live_task_id(context: ToolContext) -> str:
     return context.task_id
 
 
+def _tool_requires_task_id(tool_name: str) -> bool:
+    return tool_name in TASK_ID_TOOL_NAMES
+
+
 def _apply_live_tool_overrides(
     tool_name: str,
     arguments: dict[str, Any],
@@ -1104,7 +1113,7 @@ def _apply_live_tool_overrides(
     case = context.live_case
     seed = case.seed
     task_id = context.task_id
-    if tool_name.startswith("task."):
+    if _tool_requires_task_id(tool_name):
         task_id = _ensure_live_task_id(context)
 
     text_query = "Usage"

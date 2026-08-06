@@ -32,16 +32,14 @@ def _make_self(flat_api: object) -> SimpleNamespace:
 def test_find_byte_matches_uses_escaped_hex_pattern() -> None:
     captured: dict[str, object] = {}
 
-    def find_bytes(search_base, pattern, limit, alignment):  # noqa: ANN001, ANN202
+    def find_bytes(_search_base, pattern, limit, alignment):
         captured["pattern"] = pattern
         captured["limit"] = limit
         captured["alignment"] = alignment
         return ["0x1000"]
 
     stub_self = _make_self(SimpleNamespace(findBytes=find_bytes))
-    result = GhidraBackend._find_byte_matches(
-        stub_self, "session", b"\xde\xad\xbe\xef", 100
-    )
+    result = GhidraBackend._find_byte_matches(stub_self, "session", b"\xde\xad\xbe\xef", 100)
 
     assert result == ["0x1000"]
     assert captured["pattern"] == "\\xde\\xad\\xbe\\xef"
@@ -55,7 +53,7 @@ def test_find_byte_matches_returns_empty_on_none() -> None:
 
 
 def test_find_byte_matches_short_circuits_on_nonpositive_limit() -> None:
-    def find_bytes(*_):  # noqa: ANN002, ANN202
+    def find_bytes(*_):
         raise AssertionError("findBytes should not be called when limit <= 0")
 
     stub_self = _make_self(SimpleNamespace(findBytes=find_bytes))
@@ -63,7 +61,7 @@ def test_find_byte_matches_short_circuits_on_nonpositive_limit() -> None:
 
 
 def test_find_byte_matches_surfaces_backend_errors() -> None:
-    def find_bytes(*_):  # noqa: ANN002, ANN202
+    def find_bytes(*_):
         raise RuntimeError("no matching overload")
 
     stub_self = _make_self(SimpleNamespace(findBytes=find_bytes))

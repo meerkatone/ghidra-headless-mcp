@@ -343,14 +343,42 @@ def test_real_backend_fixes_category_paths_typedefs_relocations_and_eval_mode(
         fetched_foo = real_backend.type_get(session_id, path="/Foo")
         assert fetched_foo["type"]["name"] == "Foo"
 
+        callback_box = real_backend.type_define_c(
+            session_id,
+            declaration="typedef struct { int (*cb)(int); } CallbackBox;",
+            category="TestCat",
+        )
+        assert callback_box["type"]["path"] == "/TestCat/CallbackBox"
+        assert ".conflict" not in callback_box["type"]["path"]
+
+        named_struct = real_backend.type_define_c(
+            session_id,
+            declaration="struct NamedComposite { int value; };",
+            category="TestCat",
+        )
+        assert named_struct["type"]["path"] == "/TestCat/NamedComposite"
+
         # type.parse_c parses composites without committing, even read-only.
         parsed = real_backend.type_parse_c(
-            ro_session_id, declaration="typedef struct { int y; } Bar;"
+            ro_session_id,
+            declaration="typedef struct { int (*cb)(int); } Bar;",
+            name="TransientBar",
         )
         assert parsed["kind"] == "composite"
-        assert parsed["type"]["name"] == "Bar"
+        assert parsed["type"]["name"] == "TransientBar"
         with pytest.raises(GhidraBackendError, match="type not found"):
-            real_backend.type_get(ro_session_id, path="/Bar")
+            real_backend.type_get(ro_session_id, path="/TransientBar")
+
+        real_backend.undo_begin(session_id, description="preserve staged category")
+        real_backend.type_category_create(session_id, path="KeepMe")
+        with pytest.raises(GhidraBackendError, match="active transaction"):
+            real_backend.type_parse_c(
+                session_id,
+                declaration="typedef struct { int x; } MustNotRollback;",
+            )
+        real_backend.undo_commit(session_id)
+        root_categories = real_backend.type_category_list(session_id)
+        assert any(item["path"] == "/KeepMe" for item in root_categories["items"])
 
         # relocation.add validates the status enum name with a clear error.
         with pytest.raises(GhidraBackendError, match="unsupported relocation status"):
@@ -361,11 +389,27 @@ def test_real_backend_fixes_category_paths_typedefs_relocations_and_eval_mode(
         assert any(item["path"].endswith("relative.c") for item in added["items"])
         assert any(item["path"] != "src/relative.c" for item in added["items"])
 
-        # ghidra.eval no longer silently flips read-only sessions to writable.
+        # Raw tools cannot access a read-only program without explicit write intent.
         record = real_backend._get_record(ro_session_id)
         assert record.read_only is True
-        eval_payload = real_backend.eval_code("_ = 7", session_id=ro_session_id)
-        assert eval_payload["mode_transitioned"] is False
+        sessionless = real_backend.eval_code("_ = len(sessions)")
+        assert sessionless["result"] == 0
+        mutation_code = """
+from ghidra.program.model.data import CategoryPath
+tx = program.startTransaction("must not run")
+try:
+    _ = program.getDataTypeManager().createCategory(CategoryPath("/EvalBypass"))
+finally:
+    program.endTransaction(tx, True)
+"""
+        with pytest.raises(GhidraBackendError, match="pass write=true"):
+            real_backend.eval_code(mutation_code, session_id=ro_session_id)
+        with pytest.raises(GhidraBackendError, match="category not found"):
+            real_backend.type_category_list(ro_session_id, path="/EvalBypass")
+        with pytest.raises(GhidraBackendError, match="pass write=true"):
+            real_backend.call_api("program.getName", session_id=ro_session_id)
+        with pytest.raises(GhidraBackendError, match="pass write=true"):
+            real_backend.run_script("/tmp/does-not-run.py", session_id=ro_session_id)
         assert record.read_only is True
         write_payload = real_backend.eval_code("_ = 8", session_id=ro_session_id, write=True)
         assert write_payload["mode_transitioned"] is True

@@ -15,7 +15,7 @@ The format is based on Keep a Changelog, and this project uses Semantic Versioni
 ### Changed
 - Pytest now distinguishes `live`, `slow`, and `socket` coverage so CI can run the right gates for each environment.
 - Ruff policy now targets real defects while allowing the intentional large dispatcher-style modules and scenario-style tests.
-- `ghidra.eval`, `ghidra.call`, and `ghidra.script` no longer silently transition read-only sessions to writable; pass `write=true` to opt in.
+- `ghidra.eval`, `ghidra.call`, and `ghidra.script` reject raw access to read-only sessions unless `write=true`, which explicitly transitions the target session to writable.
 
 ### Fixed
 - Concurrent auto-analysis on the same session is rejected with a clear error instead of corrupting Ghidra's transaction stack.
@@ -24,3 +24,5 @@ The format is based on Keep a Changelog, and this project uses Semantic Versioni
 - `relocation.add` validates the status enum and reports the supported values instead of a raw `AttributeError`.
 - `source.file.add` resolves relative paths to absolute instead of failing with Ghidra's `IllegalArgumentException`.
 - Decompiler high-symbol lookups match storage case-insensitively and report candidate symbols when nothing matches.
+- C declarations with function-pointer members use the full parser, defined types honor their requested category, and non-mutating parsing no longer rolls back an active caller transaction.
+- Cancelled queued analysis tasks release the per-session analysis guard so later analysis can run.
